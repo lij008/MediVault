@@ -44,7 +44,7 @@ def main():
         ok = wait_http(f"http://127.0.0.1:{COORD_PORT}/status", timeout_sec=60)
         print("✅ Coordinator is ready." if ok else "❌ Coordinator not ready in time. Check logs.")
 
-        print("Step 2/4: Starting Pitch Dashboard (Streamlit) ...")
+        print("Step 2/4: Starting MediVault Dashboard (Streamlit) ...")
         procs.append(run([sys.executable, "-m", "streamlit", "run", "dashboard/coordinator_dashboard.py",
                           "--server.port", str(DASH_PORT), *STREAMLIT_FLAGS]))
         time.sleep(0.8)
@@ -61,12 +61,12 @@ def main():
                           "--server.port", str(PEER_B_PORT), *STREAMLIT_FLAGS], env=envB))
         time.sleep(0.6)
 
-        print("\n=== Pitch PoC is running ===")
+        print("\n=== MediVault PoC is running ===")
         print(f"Coordinator API:  http://127.0.0.1:{COORD_PORT}")
         print(f"Dashboard:        http://localhost:{DASH_PORT}")
         print(f"Peer A:           http://localhost:{PEER_A_PORT}")
         print(f"Peer B:           http://localhost:{PEER_B_PORT}\n")
-        print("Recommended pitch flow:")
+        print("Recommended Working Flow:")
         print("1) Dashboard → Init Coordinator (choose LogReg/MLP)")
         print("2) Peer A/B → Generate/Reset local data (notes optional)")
         print("3) Submit A then B each round (or enable Auto submit on both)")
