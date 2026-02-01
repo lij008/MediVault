@@ -21,7 +21,9 @@ import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
 import httpx
-from common.data_gen import FEATURES
+import os
+from common.data_gen import FEATURES, generate_peer_data, make_peer_dataset, standardize
+from common.fl_model import init_params, local_train_one_epoch_model, predict_proba_model
 
 def safe_pyplot(fig):
     st.pyplot(fig)
@@ -143,8 +145,21 @@ def draw_swimlane(ev_all: pd.DataFrame, upto: int, round_filter: int | None, hig
     ax.grid(True, axis="x", alpha=0.12)
     return fig
 
+# st.set_page_config(page_title="MediVault Dashboard", layout="wide")
+# st.title("MediVault Dashboard")
+
+# --- page config ---
+BASE_DIR = os.path.dirname(__file__)
+LOGO_PATH = os.path.join(BASE_DIR, "assets", "logo.png")
+
 st.set_page_config(page_title="MediVault Dashboard", layout="wide")
-st.title("🛡️ MediVault Dashboard")
+
+# --- header row (logo + title) ---
+c1, c2 = st.columns([1, 8], vertical_alignment="center")
+with c1:
+    st.image(LOGO_PATH, width=200)   
+with c2:
+    st.title("Dashboard")
 
 with st.sidebar:
     base = st.text_input("Coordinator URL", value="http://127.0.0.1:8000")
@@ -193,10 +208,10 @@ except Exception as e:
 ev = pd.DataFrame(events) if isinstance(events, list) else pd.DataFrame([])
 md = pd.DataFrame(metrics) if isinstance(metrics, list) else pd.DataFrame([])
 
-tabs = st.tabs(["Overview", "Details", "🎞️ Animation"])
+tabs = st.tabs(["Overview", "Details", "📊 FL vs Non‑FL", "🎞️ Animation"])
 
 with tabs[0]:
-    st.subheader("Main Tast")
+    st.subheader("Main Task")
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Model", str(status.get("model_type","—")).upper())
     col2.metric("Hidden", str(status.get("hidden_dim","—")) if str(status.get("model_type","")).lower()=="mlp" else "—")
@@ -404,7 +419,147 @@ with tabs[1]:
             st.info("MLP selected: showing parameter norms (weights are high-dimensional).")
             st.write({"||params||": float(np.linalg.norm(params)), "min": float(np.min(params)), "max": float(np.max(params))})
 
+
 with tabs[2]:
+    st.subheader("📊 Federated Learning vs Centralised (NO-FL) ")
+    st.caption("Compare accuracy using the same synthetic data, the same model, and the same training hyper‑parameters. For a fair comparison, set N and Seed here to match the values used in Peer A/B sidebars.")
+
+    # Show current FL status
+    mtype = str(status.get("model_type", "logreg")).lower()
+    hdim = int(status.get("hidden_dim", 0) or 0)
+    rounds_cfg = int(status.get("rounds_total", 5) or 5)
+
+    left, right = st.columns([1.05, 1])
+    with right:
+        st.markdown("### Current FL run")
+        st.write({
+            "model_type": mtype,
+            "hidden_dim": hdim if mtype == "mlp" else "—",
+            "rounds_total": rounds_cfg,
+            "fl_rounds_completed": int(md["round"].max()) if (md is not None and (not md.empty) and ("round" in md.columns)) else 0,
+        })
+        if md is None or md.empty:
+            st.info("No FL metrics yet. Run at least one full round (submit A then B) to see the FL accuracy curve.")
+
+    with left:
+        st.markdown("### NO-FL Set Up")
+        n_patients = st.number_input("Patients per peer (N)", value=1500, step=100, key="cmp_n")
+        seed = st.number_input("Seed (match peers)", value=42, step=1, key="cmp_seed")
+
+        st.markdown("**Training hyper‑parameters** (match peers)")
+        lr_cmp = st.number_input("LR", value=0.05, step=0.01, format="%.3f", key="cmp_lr")
+        batch_cmp = st.number_input("Batch size", value=256, step=64, key="cmp_batch")
+        l2_cmp = st.number_input("L2", value=0.001, step=0.001, format="%.3f", key="cmp_l2")
+        gc_cmp = st.number_input("Grad clip", value=5.0, step=1.0, format="%.1f", key="cmp_gc")
+        per_peer_std = st.checkbox("Standardise per peer (recommended)", value=True, key="cmp_std")
+
+        run_baseline = st.button("Run No-FL training", type="primary", key="cmp_run")
+
+    def _build_val(n: int = 1600, seed_val: int = 2026):
+        df_val = make_peer_dataset("VAL", n=int(n), seed=int(seed_val))
+        Xv, yv, _, _ = standardize(df_val)
+        return Xv, yv
+
+    def _train_baseline():
+        # Generate the same synthetic data as peers would (if they use the same N/seed)
+        dfA = generate_peer_data("A", n=int(n_patients), seed=int(seed))
+        dfB = generate_peer_data("B", n=int(n_patients), seed=int(seed))
+
+        if per_peer_std:
+            XA, yA, _, _ = standardize(dfA)
+            XB, yB, _, _ = standardize(dfB)
+            Xtr = np.vstack([XA, XB]).astype(np.float32)
+            ytr = np.concatenate([yA, yB]).astype(np.int64)
+        else:
+            df_all = pd.concat([dfA, dfB], ignore_index=True)
+            Xtr, ytr, _, _ = standardize(df_all)
+
+        Xv, yv = _build_val(n=1600, seed_val=2026)
+
+        # Match coordinator init (seed=123)
+        d = len(FEATURES)
+        params = init_params(mtype, d, hidden=int(hdim) if mtype == "mlp" else 16, seed=123).astype(np.float32)
+
+        rows = []
+        for epoch in range(1, int(rounds_cfg) + 1):
+            delta = local_train_one_epoch_model(
+                params, Xtr, ytr,
+                model_type=mtype,
+                hidden=int(hdim) if (mtype == "mlp" and int(hdim) > 0) else 16,
+                lr=float(lr_cmp),
+                batch_size=int(batch_cmp),
+                l2=float(l2_cmp),
+                grad_clip=float(gc_cmp),
+                seed=int(seed) + int(epoch)
+            )
+            params = (params + delta).astype(np.float32)
+
+            prob = predict_proba_model(params, Xv, mtype, hidden=int(hdim) if (mtype == "mlp" and int(hdim) > 0) else 16)
+            pred = (prob >= 0.5).astype(np.int64)
+            acc = float((pred == yv).mean())
+            rows.append({"round": int(epoch), "baseline_acc": acc})
+
+        return pd.DataFrame(rows)
+
+    if run_baseline:
+        with st.spinner("Running baseline training…"):
+            try:
+                base_df = _train_baseline()
+                st.session_state["baseline_curve"] = base_df
+                st.success("Baseline finished.")
+            except Exception as e:
+                st.error(f"Baseline failed: {e}")
+                base_df = None
+    else:
+        base_df = st.session_state.get("baseline_curve", None)
+
+    st.markdown("---")
+    st.markdown("### Accuracy comparison")
+
+    # Prepare curves
+    fl_curve = None
+    if md is not None and (not md.empty) and ("round" in md.columns) and ("acc" in md.columns):
+        fl_curve = md[["round", "acc"]].copy().rename(columns={"acc": "fl_acc"})
+
+    if base_df is None:
+        st.info("Click **Run NO-FL training** to compute the Centralised (No‑FL) curve.")
+    else:
+        cmp = base_df.copy()
+        if fl_curve is not None:
+            cmp = cmp.merge(fl_curve, on="round", how="left")
+
+        # Plot
+        fig, ax = plt.subplots()
+        ax.plot(cmp["round"], cmp["baseline_acc"], marker="o", label="Centralised (No‑FL)")
+        if "fl_acc" in cmp.columns:
+            ax.plot(cmp["round"], cmp["fl_acc"], marker="o", label="Federated Learning")
+        ax.set_xlabel("Round")
+        ax.set_ylabel("Accuracy")
+        ax.set_title("Accuracy: FL vs Centralised (same model + hyper‑params)")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        safe_pyplot(fig)
+
+        # Summary
+        last_base = float(cmp["baseline_acc"].iloc[-1]) if ("baseline_acc" in cmp.columns and len(cmp)) else None
+        last_fl = None
+        if "fl_acc" in cmp.columns and pd.notna(cmp["fl_acc"].iloc[-1]):
+            last_fl = float(cmp["fl_acc"].iloc[-1])
+
+        s1, s2, s3 = st.columns(3)
+        s1.metric("Centralised final acc", f"{last_base:.4f}" if last_base is not None else "—")
+        s2.metric("FL final acc", f"{last_fl:.4f}" if last_fl is not None else "—")
+        if (last_fl is not None) and (last_base is not None):
+            s3.metric("FL − Centralised", f"{(last_fl - last_base):+.4f}")
+        else:
+            s3.metric("FL − Centralised", "—")
+
+        st.markdown("#### Per‑round values")
+        df_show(cmp, height=260)
+
+        st.caption("Note: this baseline trains on pooled data (Centralised) for the same number of rounds/epochs. FL accuracy is from current demo run achieved.")
+
+with tabs[3]:
     st.subheader("🎞️ Animated Swimlane (message flow)")
     if ev.empty:
         st.info("No events yet. Init and submit from both peers.")

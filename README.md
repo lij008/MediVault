@@ -22,7 +22,7 @@ Then open:
 - Peer A:    http://localhost:8501
 - Peer B:    http://localhost:8502
 
-Getting Start:
+Pitch flow:
 1) Dashboard → Init Coordinator (choose LogReg or MLP)
 2) Peer A/B → Generate/Reset local data (optional: enable notes)
 3) Submit A then B for each round (or enable Auto submit)

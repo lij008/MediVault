@@ -66,7 +66,7 @@ def main():
         print(f"Dashboard:        http://localhost:{DASH_PORT}")
         print(f"Peer A:           http://localhost:{PEER_A_PORT}")
         print(f"Peer B:           http://localhost:{PEER_B_PORT}\n")
-        print("Recommended Working Flow:")
+        print("Recommended working flow:")
         print("1) Dashboard → Init Coordinator (choose LogReg/MLP)")
         print("2) Peer A/B → Generate/Reset local data (notes optional)")
         print("3) Submit A then B each round (or enable Auto submit on both)")
