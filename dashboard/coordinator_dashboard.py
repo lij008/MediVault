@@ -360,10 +360,8 @@ with tabs[0]:
     if md is not None and not md.empty and "round" in md.columns:
         st.markdown("---")
         st.subheader("Training progress (global)")
-        fig1, ax1 = plt.subplots()
-        ax1.plot(md["round"], md["acc"], marker="o", label="Accuracy")
-        if "auc" in md.columns:
-            ax1.plot(md["round"], md["auc"], marker="o", label="AUC")
+        fig1, ax1 = plt.subplots(figsize=(5.2, 3.2))
+        ax1.plot(md["round"], md["acc"], marker="o", label="Accuracy")s
         ax1.set_xlabel("Round"); ax1.set_ylabel("Score")
         ax1.set_title("Global model quality across rounds")
         ax1.grid(True, alpha=0.3); ax1.legend()
