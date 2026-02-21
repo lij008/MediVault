@@ -19,12 +19,31 @@ from pydantic import BaseModel
 from typing import List, Dict, Optional, Any
 import numpy as np
 import time, hashlib
+import os, json
+import requests
+from dotenv import load_dotenv
+load_dotenv()
+
+# Load environment variables from a local .env file (recommended for demos)
+try:
+    from dotenv import load_dotenv  # type: ignore
+    load_dotenv()
+except Exception:
+    # python-dotenv is optional; environment variables can still be provided by the shell/service manager.
+    pass
 
 from common.crypto import generate_paillier, add_cipher_vectors, decrypt_vector
 from common.fl_model import init_params, predict_proba_model, model_param_len
 from common.data_gen import FEATURES, make_peer_dataset, standardize
 
 from sklearn.metrics import accuracy_score, roc_auc_score
+
+# --- Optional OpenAI (for LLM insights) ---
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None
+
 
 app = FastAPI(title="Federated Coordinator (HE+SMPC+FedAvg)", version="full-clean-bundle")
 
@@ -199,6 +218,183 @@ def events(limit: int = 800):
 @app.get("/metrics")
 def metrics():
     return STATE["metrics"]
+
+
+class LLMInsightReq(BaseModel):
+    audience: str = "clinician"   # clinician | partner | investor | technical
+    provider: str = "auto"        # auto | openai | ollama
+    include_protocol: bool = True
+    include_site_stats: bool = True
+    max_rounds: int = 12
+
+class LLMInsightResp(BaseModel):
+    ok: bool
+    audience: str
+    model: Optional[str] = None
+    text: str
+    input_hash: str
+
+def _build_llm_evidence(req: LLMInsightReq) -> Dict[str, Any]:
+    # Only send aggregated, non-identifiable information to the LLM.
+    metrics = STATE.get("metrics", []) or []
+    metrics_tail = metrics[-req.max_rounds:] if req.max_rounds and len(metrics) > req.max_rounds else metrics
+
+    # Site stats in this PoC are synthetic, but keep them aggregate.
+    site_stats = STATE.get("site_stats", None)
+    if not req.include_site_stats:
+        site_stats = None
+
+    # Protocol timings derived from metrics (already aggregated)
+    protocol = None
+    if req.include_protocol and metrics_tail:
+        protocol = {
+            "rounds_included": len(metrics_tail),
+            "mean_duration_sec": float(np.mean([m.get("duration_sec", 0.0) for m in metrics_tail])),
+            "mean_bytes_total": float(np.mean([m.get("bytes_total", 0.0) for m in metrics_tail])),
+            "mean_t_encrypt_A": float(np.mean([m.get("t_encrypt_A", 0.0) for m in metrics_tail])),
+            "mean_t_encrypt_B": float(np.mean([m.get("t_encrypt_B", 0.0) for m in metrics_tail])),
+            "mean_t_he_add": float(np.mean([m.get("t_he_add", 0.0) for m in metrics_tail])),
+            "mean_t_decrypt_sum": float(np.mean([m.get("t_decrypt_sum", 0.0) for m in metrics_tail])),
+        }
+
+    # Model identity / config
+    model_info = {
+        "model_type": STATE.get("model_type"),
+        "hidden_dim": STATE.get("hidden_dim"),
+        "param_dim": int(model_param_len(STATE.get("model_type") or "logreg", STATE.get("hidden_dim") or 32)),
+        "task": TASK_DESC,
+        "label": getattr(req, "label", None),
+        "features": FEATURES,
+    }
+
+    # Trend summary (acc only — do NOT invent AUC if not used)
+    trend = None
+    if metrics_tail:
+        accs = [float(m.get("acc", 0.0)) for m in metrics_tail]
+        trend = {
+            "first_round": int(metrics_tail[0].get("round", 0)),
+            "last_round": int(metrics_tail[-1].get("round", 0)),
+            "acc_first": accs[0],
+            "acc_last": accs[-1],
+            "acc_delta": float(accs[-1] - accs[0]),
+            "acc_min": float(np.min(accs)),
+            "acc_max": float(np.max(accs)),
+        }
+
+    evidence = {
+        "timestamp_utc": int(time.time()),
+        "model_info": model_info,
+        "trend": trend,
+        "metrics_tail": metrics_tail,
+        "site_stats": site_stats,
+        "protocol_summary": protocol,
+        "notes": [
+            "This PoC shares NO patient-level data. Only aggregated metrics and synthetic site summaries are included.",
+            "If any field is missing, it should be treated as unavailable."
+        ]
+    }
+    return evidence
+
+def _llm_system_prompt(audience: str) -> str:
+    base = (
+        "You are MediVault's reporting assistant. "
+        "Use ONLY the provided JSON evidence. Do NOT invent numbers, claims, or citations. "
+        "If something is not in the evidence, say it is unavailable. "
+        "Do NOT provide clinical diagnosis. Provide decision-support wording only. "
+        "Always include a short limitations section."
+    )
+    audience = (audience or "clinician").lower()
+    if audience == "investor":
+        return base + " Write in a commercial investor tone, focusing on value, traction signals, and next steps for pilot."
+    if audience in ("partner", "nhs", "collaborator"):
+        return base + " Write for NHS/partner stakeholders: clear, cautious, benefits + governance + pilot steps."
+    if audience == "technical":
+        return base + " Write for technical reviewers: include protocol summary, assumptions, and what to validate next."
+    return base + " Write for clinicians: 60-second plain-English summary, then limitations and pilot recommendations."
+
+def _ollama_generate(system_prompt: str, user_prompt: str) -> tuple[str, str]:
+    """Return (text, model_used). Uses Ollama local server."""
+    url = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
+    model = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b-instruct")
+    # Many instruct models work well with an explicit system+user prompt concatenation.
+    prompt = f"{system_prompt}\n\n{user_prompt}\n"
+    try:
+        r = requests.post(
+            url + "/api/generate",
+            json={"model": model, "prompt": prompt, "stream": False},
+            timeout=float(os.environ.get("OLLAMA_TIMEOUT", "90")),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Ollama call failed (connection): {e}")
+    if r.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"Ollama call failed: {r.status_code} {r.text}")
+    try:
+        data = r.json()
+    except Exception:
+        raise HTTPException(status_code=502, detail=f"Ollama call failed (bad JSON): {r.text[:500]}")
+    text_out = (data.get("response") or "").strip()
+    if not text_out:
+        raise HTTPException(status_code=502, detail="Ollama call returned empty response.")
+    return text_out, model
+
+def _choose_llm_provider(req_provider: str) -> str:
+    """Resolve provider: auto -> prefer OLLAMA if reachable, else OPENAI if key set."""
+    p = (req_provider or "auto").strip().lower()
+    if p in ("openai", "ollama"):
+        return p
+    # auto: if OLLAMA_URL reachable quickly, use it; otherwise OpenAI if key set.
+    url = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
+    try:
+        rr = requests.get(url + "/api/tags", timeout=1.5)
+        if rr.status_code == 200:
+            return "ollama"
+    except Exception:
+        pass
+    return "openai"
+
+@app.post("/llm/insight", response_model=LLMInsightResp)
+def llm_insight(req: LLMInsightReq):
+    # Build evidence payload (shared for both providers)
+    evidence = _build_llm_evidence(req)
+    raw = json.dumps(evidence, sort_keys=True).encode("utf-8")
+    h = hashlib.sha256(raw).hexdigest()[:12]
+
+    system_prompt = _llm_system_prompt(req.audience)
+    user_prompt = "Evidence JSON (do not invent anything):\n" + json.dumps(evidence, indent=2)
+
+    provider = _choose_llm_provider(getattr(req, "provider", "auto"))
+    if provider == "ollama":
+        text_out, model_used = _ollama_generate(system_prompt, user_prompt)
+        return LLMInsightResp(ok=True, audience=req.audience, model=f"ollama:{model_used}", text=text_out, input_hash=h)
+
+    # OpenAI path (cloud)
+    if OpenAI is None:
+        raise HTTPException(status_code=500, detail="OpenAI SDK not installed. Add 'openai' to requirements and reinstall.")
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        raise HTTPException(status_code=400, detail="OPENAI_API_KEY is not set on the coordinator host.")
+    client = OpenAI(api_key=api_key)
+    model = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
+
+    try:
+        resp = client.responses.create(
+            model=model,
+            input=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        text_out = getattr(resp, "output_text", None) or ""
+        if not text_out:
+            try:
+                text_out = resp.output[0].content[0].text  # type: ignore
+            except Exception:
+                text_out = ""
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"OpenAI call failed: {e}")
+
+    return LLMInsightResp(ok=True, audience=req.audience, model=f"openai:{model}", text=text_out, input_hash=h)
+
 
 def finish_round():
     r = STATE["current_round"]

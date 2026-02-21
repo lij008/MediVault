@@ -208,9 +208,15 @@ except Exception as e:
 ev = pd.DataFrame(events) if isinstance(events, list) else pd.DataFrame([])
 md = pd.DataFrame(metrics) if isinstance(metrics, list) else pd.DataFrame([])
 
-tabs = st.tabs(["Overview", "Details", "📊 FL vs Non‑FL", "🎞️ Animation"])
+tab_overview, tab_details, tab_compare, tab_llm, tab_animation = st.tabs([
+    "Overview",
+    "Details",
+    "FL vs Non-FL",
+    "LLM Insights",
+    "Animation",
+])
 
-with tabs[0]:
+with tab_overview:
     st.subheader("Main Task")
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Model", str(status.get("model_type","—")).upper())
@@ -360,14 +366,18 @@ with tabs[0]:
     if md is not None and not md.empty and "round" in md.columns:
         st.markdown("---")
         st.subheader("Training progress (global)")
+        #fig1, ax1 = plt.subplots()
+        #ax1.plot(md["round"], md["acc"], marker="o", label="Accuracy")
+        #if "auc" in md.columns:
+        #    ax1.plot(md["round"], md["auc"], marker="o", label="AUC")
         fig1, ax1 = plt.subplots(figsize=(5.2, 3.2))
-        ax1.plot(md["round"], md["acc"], marker="o", label="Accuracy")s
+        ax1.plot(md["round"], md["acc"], marker="o", label="Accuracy")
         ax1.set_xlabel("Round"); ax1.set_ylabel("Score")
         ax1.set_title("Global model quality across rounds")
         ax1.grid(True, alpha=0.3); ax1.legend()
         safe_pyplot(fig1)
 
-with tabs[1]:
+with tab_details:
     st.subheader("Secure collaboration evidence")
     c1, c2 = st.columns([1, 1])
     with c1:
@@ -418,7 +428,7 @@ with tabs[1]:
             st.write({"||params||": float(np.linalg.norm(params)), "min": float(np.min(params)), "max": float(np.max(params))})
 
 
-with tabs[2]:
+with tab_compare:
     st.subheader("📊 Federated Learning vs Centralised (NO-FL) ")
     st.caption("Compare accuracy using the same synthetic data, the same model, and the same training hyper‑parameters. For a fair comparison, set N and Seed here to match the values used in Peer A/B sidebars.")
 
@@ -557,7 +567,35 @@ with tabs[2]:
 
         st.caption("Note: this baseline trains on pooled data (Centralised) for the same number of rounds/epochs. FL accuracy is from current demo run achieved.")
 
-with tabs[3]:
+
+with tab_llm:
+    st.subheader("LLM Insights (OpenAI / Ollama)")
+    st.caption("Generates an evidence-grounded summary from aggregated metrics. No patient-level data is sent.")
+
+    provider = st.selectbox("Provider", ["auto", "ollama", "openai"], index=0, help="auto: prefer local Ollama if available, otherwise OpenAI.")
+    aud = st.selectbox("Audience", ["clinician", "partner", "investor", "technical"], index=0, help="Controls tone and focus.")
+    c1, c2, c3 = st.columns([1,1,1])
+    max_rounds = c1.number_input("Include last N rounds", min_value=1, max_value=200, value=12, step=1)
+    include_protocol = c2.checkbox("Include protocol timings", value=True)
+    include_site = c3.checkbox("Include site aggregates", value=True)
+
+    if st.button("Generate summary", type="primary"):
+        try:
+            payload = {"audience": aud, "provider": provider, "include_protocol": bool(include_protocol), "include_site_stats": bool(include_site), "max_rounds": int(max_rounds)}
+            with httpx.Client(timeout=60) as client:
+                r = client.post(base + "/llm/insight", json=payload)
+            if r.status_code != 200:
+                st.error(f"LLM call failed: {r.status_code} {r.text}")
+            else:
+                data = r.json()
+                st.success(f"Generated (model: {data.get('model','')}, hash: {data.get('input_hash','')})")
+                st.markdown(data.get("text",""))
+        except Exception as e:
+            st.error(f"LLM call error: {e}")
+
+    with st.expander("Setup (server env vars)", expanded=False):
+        st.code("export OPENAI_API_KEY=...\nexport OPENAI_MODEL=gpt-4.1-mini  # optional", language="bash")
+with tab_animation:
     st.subheader("🎞️ Animated Swimlane (message flow)")
     if ev.empty:
         st.info("No events yet. Init and submit from both peers.")

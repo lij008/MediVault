@@ -11,13 +11,65 @@ All models use a single flattened params vector.
 from __future__ import annotations
 import numpy as np
 
+# ---------- Numeric safety helpers ----------
+_CLIP_Z = 50.0          # for sigmoid/logits
+_CLIP_XW = 1e6          # pre-matmul clip for X/W
+_MAX_EST = 1e150        # matmul magnitude guard
+_GRAD_CLIP_DEFAULT = 5.0
+
+def _clean(a: np.ndarray, *, clip: float = _CLIP_XW) -> np.ndarray:
+    """Replace NaN/Inf and clip to finite range."""
+    a = np.asarray(a, dtype=np.float64)
+    a = np.nan_to_num(a, nan=0.0, posinf=clip, neginf=-clip)
+    if clip is not None:
+        a = np.clip(a, -clip, clip)
+    return a
+
+def _safe_matmul(A, B, clip=1e4, target=1e120):
+    """
+    Numerically safer matmul:
+    - replace NaN/Inf with finite values
+    - clip magnitudes
+    - dynamic scaling to avoid overflow in BLAS matmul
+    - suppress numpy runtime warnings inside matmul (we sanitise outputs anyway)
+    """
+    import numpy as np
+
+    def _clean(x):
+        x = np.asarray(x, dtype=np.float64)
+        x = np.nan_to_num(x, nan=0.0, posinf=clip, neginf=-clip)
+        x = np.clip(x, -clip, clip)
+        return x
+
+    Af = _clean(A)
+    Bf = _clean(B)
+
+    # Dynamic scaling (rough bound on dot product magnitude)
+    # bound ~ max|A| * max|B| * d
+    d = Af.shape[1] if Af.ndim == 2 else 1
+    maxA = float(np.max(np.abs(Af))) if Af.size else 0.0
+    maxB = float(np.max(np.abs(Bf))) if Bf.size else 0.0
+    est = maxA * maxB * max(1, d)
+
+    if (not np.isfinite(est)) or est > target:
+        # scale both by sqrt to keep product similar scale
+        s = np.sqrt(est / target) if np.isfinite(est) and est > 0 else 1e3
+        Af = Af / s
+        Bf = Bf / s
+
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        Z = Af @ Bf
+
+    Z = np.nan_to_num(Z, nan=0.0, posinf=clip, neginf=-clip)
+    Z = np.clip(Z, -clip, clip)
+    return Z
+
 def sigmoid(x: np.ndarray) -> np.ndarray:
-    x = np.clip(x, -30, 30)
+    x = np.clip(x, -_CLIP_Z, _CLIP_Z)
     return 1.0 / (1.0 + np.exp(-x))
 
 def relu(x: np.ndarray) -> np.ndarray:
     return np.maximum(0.0, x)
-
 def model_param_len(model_type: str, d: int, hidden: int = 16) -> int:
     mt = str(model_type).lower()
     if mt in ("logreg", "logistic", "lr"):
@@ -60,14 +112,14 @@ def predict_proba_model(params: np.ndarray, X: np.ndarray, model_type: str, hidd
     if mt in ("logreg", "logistic", "lr"):
         w = params[:-1]
         b = params[-1]
-        return sigmoid(X @ w + b)
+        return sigmoid(_safe_matmul(X, w) + b)
     if mt in ("mlp", "nn"):
         d = X.shape[1]
         h = int(hidden)
         W1, b1, W2, b2 = unpack_mlp(params, d, h)
-        z1 = X @ W1 + b1
+        z1 = _safe_matmul(X, W1) + b1
         a1 = relu(z1)
-        logits = a1 @ W2 + b2
+        logits = _safe_matmul(a1, W2) + b2
         return sigmoid(logits)
     raise ValueError(f"unknown model_type: {model_type}")
 
@@ -93,10 +145,12 @@ def local_train_one_epoch_model(params: np.ndarray, X: np.ndarray, y: np.ndarray
             Xb = X[j].astype(np.float32)
             yb = y[j].astype(np.float32)
 
-            p = 1.0 / (1.0 + np.exp(-np.clip(Xb @ w + b, -30, 30)))
+            logits = _safe_matmul(Xb, w) + b
+            p = sigmoid(logits)
             err = (p - yb) / float(len(yb))
+            err = np.nan_to_num(err, nan=0.0, posinf=0.0, neginf=0.0)
 
-            grad_w = (Xb.T @ err).astype(np.float32) + (l2 * w)
+            grad_w = _safe_matmul(Xb.T, err).astype(np.float32) + (l2 * w)
             grad_b = np.float32(err.sum())
 
             gnorm = float(np.linalg.norm(grad_w))
@@ -123,18 +177,19 @@ def local_train_one_epoch_model(params: np.ndarray, X: np.ndarray, y: np.ndarray
             Xb = X[j].astype(np.float32)
             yb = y[j].astype(np.float32).reshape(-1)
 
-            z1 = Xb @ W1 + b1
+            z1 = _safe_matmul(Xb, W1) + b1
             a1 = np.maximum(0.0, z1)
-            logits = a1 @ W2 + b2
-            p = 1.0 / (1.0 + np.exp(-np.clip(logits, -30, 30)))
+            logits = _safe_matmul(a1, W2) + b2
+            p = sigmoid(logits)
 
             dlogits = (p - yb) / float(len(yb))
+            dlogits = np.nan_to_num(dlogits, nan=0.0, posinf=0.0, neginf=0.0)
 
-            grad_W2 = (a1.T @ dlogits).astype(np.float32) + l2 * W2
+            grad_W2 = _safe_matmul(a1.T, dlogits).astype(np.float32) + l2 * W2
             grad_b2 = np.float32(dlogits.sum())
             da1 = (dlogits.reshape(-1,1) * W2.reshape(1,-1)).astype(np.float32)
             dz1 = da1 * (z1 > 0).astype(np.float32)
-            grad_W1 = (Xb.T @ dz1).astype(np.float32) + l2 * W1
+            grad_W1 = _safe_matmul(Xb.T, dz1).astype(np.float32) + l2 * W1
             grad_b1 = dz1.sum(axis=0).astype(np.float32)
 
             gnorm = float(np.sqrt(np.sum(grad_W1**2) + np.sum(grad_b1**2) + np.sum(grad_W2**2) + float(grad_b2**2)))

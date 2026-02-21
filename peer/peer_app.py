@@ -52,7 +52,7 @@ if PEER_ID not in ("A","B"):
     PEER_ID = "A"
 SIGN = +1 if PEER_ID == "A" else -1
 
-st.title(f"🏥 Peer {PEER_ID} — Local Data + Encrypted FL Client")
+st.title(f"Peer {PEER_ID} — Local Data + Encrypted FL Client")
 st.caption("Raw data stays local. Only encrypted, masked model updates are sent.")
 
 with st.sidebar:
@@ -170,7 +170,7 @@ with c2:
 
 if use_notes and "clinical_note" in df.columns:
     st.markdown("---")
-    st.subheader("📝 Example fictional NHS-style notes (pitch-friendly)")
+    st.subheader("Example fictional NHS-style notes (pitch-friendly)")
     for i, t in enumerate(df["clinical_note"].head(5).tolist(), start=1):
         st.markdown(f"**Note {i}:** {t}")
 
@@ -188,7 +188,7 @@ except Exception as e:
     st.warning(f"Global model not available yet: {e}")
 
 st.markdown("---")
-st.subheader("📤 Train + Encrypt + Submit")
+st.subheader("Train + Encrypt + Submit")
 
 def do_submit_once():
     with httpx.Client(timeout=120.0) as http:
@@ -295,9 +295,9 @@ def do_submit_once():
 
         if resp.get("ok"):
             st.session_state.last_round = round_idx
-            st.session_state.status_msg = f"[{PEER_ID}] ✅ Submitted round {round_idx} ({bytes_payload/1024:.1f} KB)"
+            st.session_state.status_msg = f"[{PEER_ID}] Submitted round {round_idx} ({bytes_payload/1024:.1f} KB)"
         else:
-            st.session_state.status_msg = f"[{PEER_ID}] ❌ Submit failed: {resp.get('error','unknown')}"
+            st.session_state.status_msg = f"[{PEER_ID}] Submit failed: {resp.get('error','unknown')}"
 
 if btn_submit:
     do_submit_once()
