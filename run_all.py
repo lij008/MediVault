@@ -42,7 +42,7 @@ def main():
         print("Step 1/4: Starting Federated Coordinator (FastAPI) ...")
         procs.append(run([sys.executable, "-m", "uvicorn", "coordinator.server:app", "--port", str(COORD_PORT)]))
         ok = wait_http(f"http://127.0.0.1:{COORD_PORT}/status", timeout_sec=60)
-        print("✅ Coordinator is ready." if ok else "❌ Coordinator not ready in time. Check logs.")
+        print("Coordinator is ready." if ok else "Coordinator not ready in time. Check logs.")
 
         print("Step 2/4: Starting MediVault Dashboard (Streamlit) ...")
         procs.append(run([sys.executable, "-m", "streamlit", "run", "dashboard/coordinator_dashboard.py",
@@ -88,7 +88,7 @@ def main():
                     p.kill()
             except Exception:
                 pass
-        print("✅ Stopped.")
+        print("Stopped.")
 
 if __name__ == "__main__":
     main()
