@@ -225,7 +225,7 @@ with tab_overview:
     col4.metric("Features", str(len(FEATURES)))
 
     st.markdown("---")
-    st.subheader("🧠 This round learned…")
+    st.subheader("This round learned…")
     if ev.empty or "event" not in ev.columns:
         st.info("No events yet. Submit from both peers to complete a round.")
     else:
@@ -253,7 +253,7 @@ with tab_overview:
                 st.write(last)
 
     st.markdown("---")
-    st.subheader("📝 A/B clinical note examples (fictional)")
+    st.subheader("A/B clinical note examples (fictional)")
     if ev.empty or "event" not in ev.columns:
         st.info("No note samples yet. Submit from peers.")
     else:
@@ -304,7 +304,7 @@ with tab_overview:
     st.markdown("---")
 
     st.markdown("---")
-    st.subheader("📡 What is transmitted over the network?")
+    st.subheader("What is transmitted over the network?")
     st.caption("Public view: we send encrypted, masked *model updates* (Δ) — not patient records. Technical view is optional.")
     if ev.empty or "event" not in ev.columns:
         st.info("No network packets yet. Submit once from Peer A and Peer B.")
@@ -429,7 +429,7 @@ with tab_details:
 
 
 with tab_compare:
-    st.subheader("📊 Federated Learning vs Centralised (NO-FL) ")
+    st.subheader("Federated Learning vs Centralised (NO-FL) ")
     st.caption("Compare accuracy using the same synthetic data, the same model, and the same training hyper‑parameters. For a fair comparison, set N and Seed here to match the values used in Peer A/B sidebars.")
 
     # Show current FL status
@@ -596,12 +596,12 @@ with tab_llm:
     with st.expander("Setup (server env vars)", expanded=False):
         st.code("export OPENAI_API_KEY=...\nexport OPENAI_MODEL=gpt-4.1-mini  # optional", language="bash")
 with tab_animation:
-    st.subheader("🎞️ Animated Swimlane (message flow)")
+    st.subheader("Animated Swimlane (message flow)")
     if ev.empty:
         st.info("No events yet. Init and submit from both peers.")
     else:
         if "event" in ev.columns and (ev["event"] == "round_blocked").any():
-            st.error("🚨 ROUND BLOCKED detected — likely wrong secret/sign (attack demo).", icon="🚨")
+            st.error("ROUND BLOCKED detected — likely wrong secret/sign (attack demo).", icon="🚨")
 
         if "frame" not in st.session_state:
             st.session_state.frame = 0
